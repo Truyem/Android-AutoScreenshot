@@ -23,7 +23,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -36,7 +38,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -50,6 +52,9 @@ class MainActivity : ComponentActivity() {
         private const val PREFS_NAME = "AutoScreenshotPrefs"
         private const val KEY_SERVICE_RUNNING = "service_running"
         private const val AUTO_START_SERVICE = "AUTO_START_SERVICE"
+        private const val KEY_SCREENSHOT_INTERVAL_SECONDS = "screenshot_interval_seconds"
+        private const val KEY_WEBHOOK_URL = "webhook_url"
+        private const val DEFAULT_SCREENSHOT_INTERVAL_SECONDS = 10L
     }
     
     private lateinit var mediaProjectionManager: MediaProjectionManager
@@ -57,8 +62,10 @@ class MainActivity : ComponentActivity() {
     private lateinit var mediaProjectionLauncher: ActivityResultLauncher<Intent>
     private lateinit var prefs: SharedPreferences
     
-    private var isServiceRunning = false
+    private var isServiceRunning by mutableStateOf(false)
     private var shouldAutoStart = false
+    private var screenshotIntervalSeconds by mutableStateOf(DEFAULT_SCREENSHOT_INTERVAL_SECONDS)
+    private var webhookUrl by mutableStateOf("")
     
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -67,6 +74,8 @@ class MainActivity : ComponentActivity() {
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         isServiceRunning = prefs.getBoolean(KEY_SERVICE_RUNNING, false)
         shouldAutoStart = intent?.getBooleanExtra(AUTO_START_SERVICE, false) ?: false
+        screenshotIntervalSeconds = prefs.getLong(KEY_SCREENSHOT_INTERVAL_SECONDS, DEFAULT_SCREENSHOT_INTERVAL_SECONDS)
+        webhookUrl = prefs.getString(KEY_WEBHOOK_URL, "") ?: ""
         
         mediaProjectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         
@@ -102,6 +111,8 @@ class MainActivity : ComponentActivity() {
                 // Start screenshot service
                 val serviceIntent = Intent(this, ScreenshotService::class.java)
                 serviceIntent.putExtra(ScreenshotService.EXTRA_RESULT_DATA, result.data)
+                serviceIntent.putExtra(ScreenshotService.EXTRA_INTERVAL_SECONDS, screenshotIntervalSeconds)
+                serviceIntent.putExtra(ScreenshotService.EXTRA_WEBHOOK_URL, webhookUrl)
                 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     startForegroundService(serviceIntent)
@@ -127,6 +138,9 @@ class MainActivity : ComponentActivity() {
                 ) {
                     ScreenshotScreen(
                         isServiceRunning = isServiceRunning,
+                        initialIntervalSeconds = screenshotIntervalSeconds.toString(),
+                        initialWebhookUrl = webhookUrl,
+                        onSettingsChanged = { intervalSeconds, webhook -> saveCaptureSettings(intervalSeconds, webhook) },
                         onStartService = { startScreenshotCapture() },
                         onStopService = { stopScreenshotService() }
                     )
@@ -162,6 +176,15 @@ class MainActivity : ComponentActivity() {
     
     private fun saveServiceRunningState(running: Boolean) {
         prefs.edit().putBoolean(KEY_SERVICE_RUNNING, running).apply()
+    }
+
+    private fun saveCaptureSettings(intervalSeconds: Long, webhook: String) {
+        screenshotIntervalSeconds = intervalSeconds.coerceAtLeast(1L)
+        webhookUrl = webhook.trim()
+        prefs.edit()
+            .putLong(KEY_SCREENSHOT_INTERVAL_SECONDS, screenshotIntervalSeconds)
+            .putString(KEY_WEBHOOK_URL, webhookUrl)
+            .apply()
     }
     
     private fun startScreenshotCapture() {
@@ -281,10 +304,19 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun ScreenshotScreen(
     isServiceRunning: Boolean,
+    initialIntervalSeconds: String,
+    initialWebhookUrl: String,
+    onSettingsChanged: (Long, String) -> Unit,
     onStartService: () -> Unit,
     onStopService: () -> Unit
 ) {
-    val context = LocalContext.current
+    var intervalText by remember { mutableStateOf(initialIntervalSeconds) }
+    var webhookText by remember { mutableStateOf(initialWebhookUrl) }
+
+    LaunchedEffect(intervalText, webhookText) {
+        val intervalSeconds = intervalText.toLongOrNull()?.coerceAtLeast(1L) ?: 10L
+        onSettingsChanged(intervalSeconds, webhookText)
+    }
     
     Scaffold { innerPadding ->
         Column(
@@ -303,10 +335,31 @@ fun ScreenshotScreen(
             Spacer(modifier = Modifier.height(16.dp))
             
             Text(
-                text = "This app will take screenshots every 10 seconds and organize them by date. Identical screenshots are automatically removed.",
+                text = "This app will take screenshots on your chosen interval, organize them by date, remove duplicates, and optionally send new screenshots to a webhook.",
                 style = MaterialTheme.typography.bodyMedium
             )
             
+            Spacer(modifier = Modifier.height(24.dp))
+
+            OutlinedTextField(
+                value = intervalText,
+                onValueChange = { intervalText = it.filter(Char::isDigit).ifBlank { "1" } },
+                label = { Text("Interval (seconds)") },
+                enabled = !isServiceRunning,
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            OutlinedTextField(
+                value = webhookText,
+                onValueChange = { webhookText = it },
+                label = { Text("Webhook URL (optional)") },
+                enabled = !isServiceRunning,
+                singleLine = true
+            )
+
             Spacer(modifier = Modifier.height(32.dp))
             
             if (isServiceRunning) {
@@ -342,6 +395,9 @@ fun ScreenshotScreenPreview() {
     AutoScreenshotTheme {
         ScreenshotScreen(
             isServiceRunning = false,
+            initialIntervalSeconds = "10",
+            initialWebhookUrl = "",
+            onSettingsChanged = { _, _ -> },
             onStartService = {},
             onStopService = {}
         )

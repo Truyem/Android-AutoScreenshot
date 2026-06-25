@@ -29,7 +29,9 @@ import com.simonbrs.autoscreenshot.R
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
-import java.nio.ByteBuffer
+import java.io.OutputStreamWriter
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.Calendar
 import java.util.Locale
 import java.util.concurrent.Executors
@@ -43,9 +45,12 @@ class ScreenshotService : Service() {
         private const val TAG = "ScreenshotService"
         private const val NOTIFICATION_ID = 1
         private const val CHANNEL_ID = "ScreenshotServiceChannel"
-        private const val SCREENSHOT_INTERVAL_MS = 10000L // 10 seconds
+        private const val DEFAULT_SCREENSHOT_INTERVAL_SECONDS = 10L
+        private const val MIN_SCREENSHOT_INTERVAL_SECONDS = 1L
         
         const val EXTRA_RESULT_DATA = "extra_result_data"
+        const val EXTRA_INTERVAL_SECONDS = "extra_interval_seconds"
+        const val EXTRA_WEBHOOK_URL = "extra_webhook_url"
         
         // Flag to ensure only one instance is running
         private val isRunning = AtomicBoolean(false)
@@ -67,6 +72,8 @@ class ScreenshotService : Service() {
     private var notificationManager: NotificationManager? = null
     private var isCapturingImage = AtomicBoolean(false)
     private var wakeLock: PowerManager.WakeLock? = null
+    private var screenshotIntervalMs = TimeUnit.SECONDS.toMillis(DEFAULT_SCREENSHOT_INTERVAL_SECONDS)
+    private var webhookUrl = ""
     
     // Add listener inline variable
     private var imageListener: ImageReader.OnImageAvailableListener? = null
@@ -94,6 +101,10 @@ class ScreenshotService : Service() {
         
         try {
             if (intent != null && intent.hasExtra(EXTRA_RESULT_DATA)) {
+                val intervalSeconds = intent.getLongExtra(EXTRA_INTERVAL_SECONDS, DEFAULT_SCREENSHOT_INTERVAL_SECONDS)
+                    .coerceAtLeast(MIN_SCREENSHOT_INTERVAL_SECONDS)
+                screenshotIntervalMs = TimeUnit.SECONDS.toMillis(intervalSeconds)
+                webhookUrl = intent.getStringExtra(EXTRA_WEBHOOK_URL)?.trim().orEmpty()
                 // Start foreground service BEFORE setting up media projection
                 val notification = createNotification()
                 
@@ -139,9 +150,9 @@ class ScreenshotService : Service() {
                                 if (isServiceRunning) {
                                     takeScreenshot()
                                 }
-                            }, SCREENSHOT_INTERVAL_MS, SCREENSHOT_INTERVAL_MS, TimeUnit.MILLISECONDS)
+                            }, screenshotIntervalMs, screenshotIntervalMs, TimeUnit.MILLISECONDS)
                             
-                            Log.d(TAG, "Screenshot scheduler started with interval: $SCREENSHOT_INTERVAL_MS ms")
+                            Log.d(TAG, "Screenshot scheduler started with interval: $screenshotIntervalMs ms")
                         }
                     } else {
                         Log.e(TAG, "No media projection data")
@@ -221,7 +232,7 @@ class ScreenshotService : Service() {
     private fun createNotification(): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Auto Screenshot")
-            .setContentText("Taking screenshots every 10 seconds (Total: ${screenshotCount.get()})")
+            .setContentText("Taking screenshots every ${TimeUnit.MILLISECONDS.toSeconds(screenshotIntervalMs)} seconds (Total: ${screenshotCount.get()})")
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setSilent(true)
@@ -467,6 +478,9 @@ class ScreenshotService : Service() {
                         if (isNewScreenshot) {
                             previousScreenshotPath = fullPath
                             screenshotCount.incrementAndGet()
+                            if (sendScreenshotToWebhook(file) && file.delete()) {
+                                Log.d(TAG, "Deleted screenshot after successful webhook upload: $fullPath")
+                            }
                             mainHandler.post { updateNotification() }
                         }
                     } else {
@@ -478,6 +492,57 @@ class ScreenshotService : Service() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error in saveBitmapToFile", e)
+        }
+    }
+
+    private fun sendScreenshotToWebhook(file: File): Boolean {
+        if (webhookUrl.isBlank()) {
+            return false
+        }
+
+        return try {
+            val boundary = "AutoScreenshotBoundary${System.currentTimeMillis()}"
+            val connection = (URL(webhookUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                doOutput = true
+                connectTimeout = 15_000
+                readTimeout = 15_000
+                setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+            }
+
+            connection.outputStream.use { output ->
+                OutputStreamWriter(output, Charsets.UTF_8).use { writer ->
+                    writer.append("--$boundary\r\n")
+                    writer.append("Content-Disposition: form-data; name=\"payload_json\"\r\n")
+                    writer.append("Content-Type: application/json\r\n\r\n")
+                    writer.append("{\"content\":\"New screenshot: ${file.name}\"}\r\n")
+                    writer.append("--$boundary\r\n")
+                    writer.append("Content-Disposition: form-data; name=\"files[0]\"; filename=\"${file.name}\"\r\n")
+                    writer.append("Content-Type: image/png\r\n\r\n")
+                    writer.flush()
+
+                    file.inputStream().use { input ->
+                        input.copyTo(output)
+                    }
+                    output.flush()
+
+                    writer.append("\r\n--$boundary--\r\n")
+                    writer.flush()
+                }
+            }
+
+            val responseCode = connection.responseCode
+            connection.disconnect()
+            if (responseCode !in 200..299) {
+                Log.e(TAG, "Webhook upload failed with HTTP $responseCode")
+                false
+            } else {
+                Log.d(TAG, "Screenshot uploaded to webhook: ${file.name}")
+                true
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error sending screenshot to webhook", e)
+            false
         }
     }
 
