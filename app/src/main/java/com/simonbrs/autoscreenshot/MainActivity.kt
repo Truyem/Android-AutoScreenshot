@@ -238,8 +238,9 @@ class MainActivity : ComponentActivity() {
             }
         }
         
-        // Check storage permissions for Android < 10
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+        // Check storage permissions through Android 10. Android 10 still needs the
+        // legacy storage runtime grants when writing directly to /storage/emulated/0.
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != 
                     PackageManager.PERMISSION_GRANTED) {
                 permissionsToRequest.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
@@ -255,7 +256,8 @@ class MainActivity : ComponentActivity() {
             return false
         }
         
-        // For Android 10+, check if we have manage external storage permission
+        // For Android 11+, check if we have manage external storage permission.
+        // Android 10 uses requestLegacyExternalStorage plus READ/WRITE_EXTERNAL_STORAGE.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             if (!Environment.isExternalStorageManager()) {
                 requestManageExternalStoragePermission()
