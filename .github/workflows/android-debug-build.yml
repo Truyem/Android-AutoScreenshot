@@ -31,6 +31,8 @@ jobs:
       - name: Build debug APK
         run: ./gradlew assembleDebug
 
+      # Keep release uploads as a raw .apk file instead of using upload-artifact,
+      # because GitHub Actions artifacts are downloaded as .zip archives.
       - name: Prepare release APK
         if: startsWith(github.ref, 'refs/tags/')
         run: |
