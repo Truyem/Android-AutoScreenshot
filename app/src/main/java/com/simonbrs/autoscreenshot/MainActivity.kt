@@ -7,16 +7,11 @@ import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
-import android.os.PowerManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
 import android.widget.Toast
-import java.io.OutputStreamWriter
-import java.net.HttpURLConnection
-import java.net.URL
-import java.util.concurrent.Executors
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -57,7 +52,6 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val STORAGE_PERMISSION_CODE = 100
         private const val OVERLAY_PERMISSION_CODE = 101
-        private const val BATTERY_OPTIMIZATION_PERMISSION_CODE = 102
         private const val PREFS_NAME = "AutoScreenshotPrefs"
         private const val KEY_SERVICE_RUNNING = "service_running"
         private const val AUTO_START_SERVICE = "AUTO_START_SERVICE"
@@ -81,7 +75,6 @@ class MainActivity : ComponentActivity() {
     private var webhookMessage by mutableStateOf("")
     private var webhookTimezone by mutableStateOf("Asia/Ho_Chi_Minh")
     private var deletePreviousWebhookMessage by mutableStateOf(false)
-    private val webhookExecutor = Executors.newSingleThreadExecutor()
     
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -167,11 +160,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onDestroy() {
-        webhookExecutor.shutdown()
-        super.onDestroy()
-    }
-    
     override fun onResume() {
         super.onResume()
         
@@ -187,10 +175,6 @@ class MainActivity : ComponentActivity() {
                 return
             }
             
-            if (isBatteryOptimizationBlocking()) {
-                requestIgnoreBatteryOptimization()
-                return
-            }
             // All permissions are granted, continue with media projection
             requestMediaProjection()
         }
@@ -248,11 +232,6 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        if (isBatteryOptimizationBlocking()) {
-            requestIgnoreBatteryOptimization()
-            return
-        }
-        
         val intent = mediaProjectionManager.createScreenCaptureIntent()
         mediaProjectionLauncher.launch(intent)
     }
@@ -318,32 +297,9 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        if (isBatteryOptimizationBlocking()) {
-            requestIgnoreBatteryOptimization()
-            return
-        }
-
         requestMediaProjection()
     }
 
-    private fun isBatteryOptimizationBlocking(): Boolean {
-        val powerManager = getSystemService(POWER_SERVICE) as PowerManager
-        return !powerManager.isIgnoringBatteryOptimizations(packageName)
-    }
-
-    private fun requestIgnoreBatteryOptimization() {
-        try {
-            Toast.makeText(this, "Please allow battery optimization exemption for background screenshots", Toast.LENGTH_LONG).show()
-            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                data = Uri.parse("package:$packageName")
-            }
-            startActivityForResult(intent, BATTERY_OPTIMIZATION_PERMISSION_CODE)
-        } catch (e: Exception) {
-            Toast.makeText(this, "Battery optimization permission is blocked", Toast.LENGTH_LONG).show()
-            handleBlockedPermission("Battery optimization exemption is blocked")
-        }
-    }
-    
     private fun requestManageExternalStoragePermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
@@ -360,70 +316,20 @@ class MainActivity : ComponentActivity() {
     
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        
+
         if (requestCode == OVERLAY_PERMISSION_CODE) {
             if (Settings.canDrawOverlays(this)) {
                 continuePermissionFlow()
             } else {
                 handleBlockedPermission("Overlay permission was denied")
             }
-        } else if (requestCode == BATTERY_OPTIMIZATION_PERMISSION_CODE) {
-            if (isBatteryOptimizationBlocking()) {
-                handleBlockedPermission("Battery optimization exemption was denied")
-            } else {
-                continuePermissionFlow()
-            }
         }
     }
 
     private fun handleBlockedPermission(reason: String) {
-        Toast.makeText(this, "$reason. Webhook has been disabled.", Toast.LENGTH_LONG).show()
-        sendPermissionBlockedWebhook(reason)
-        webhookUrl = ""
-        prefs.edit().putString(KEY_WEBHOOK_URL, webhookUrl).apply()
+        Toast.makeText(this, reason, Toast.LENGTH_LONG).show()
     }
 
-    private fun sendPermissionBlockedWebhook(reason: String) {
-        val url = webhookUrl.trim()
-        if (url.isBlank()) {
-            return
-        }
-
-        webhookExecutor.execute {
-            try {
-                val connection = (URL(url).openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    doOutput = true
-                    connectTimeout = 15_000
-                    readTimeout = 15_000
-                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                }
-
-                connection.outputStream.use { output ->
-                    OutputStreamWriter(output, Charsets.UTF_8).use { writer ->
-                        writer.write("{\"content\":\"Auto Screenshot stopped webhook because permission was blocked: ${escapeJson(reason)}\"}")
-                        writer.flush()
-                    }
-                }
-
-                val responseCode = connection.responseCode
-                connection.disconnect()
-                if (responseCode !in 200..299) {
-                    android.util.Log.e("MainActivity", "Permission blocked webhook failed with HTTP $responseCode")
-                }
-            } catch (e: Exception) {
-                android.util.Log.e("MainActivity", "Error sending permission blocked webhook", e)
-            }
-        }
-    }
-
-    private fun escapeJson(value: String): String {
-        return value
-            .replace("\\", "\\\\")
-            .replace("\"", "\\\"")
-            .replace("\n", "\\n")
-            .replace("\r", "\\r")
-    }
 }
 
 @Composable
