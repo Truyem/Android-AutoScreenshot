@@ -492,8 +492,8 @@ class ScreenshotService : Service() {
                         if (isNewScreenshot) {
                             previousScreenshotPath = fullPath
                             screenshotCount.incrementAndGet()
-                            if (sendScreenshotToWebhook(file) && file.delete()) {
-                                Log.d(TAG, "Deleted screenshot after successful webhook upload: $fullPath")
+                            if (sendScreenshotToWebhook(file)) {
+                                deleteScreenshotAfterWebhook(file, fullPath)
                             }
                             mainHandler.post { updateNotification() }
                         }
@@ -506,6 +506,14 @@ class ScreenshotService : Service() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error in saveBitmapToFile", e)
+        }
+    }
+
+    private fun deleteScreenshotAfterWebhook(file: File, fullPath: String) {
+        if (file.delete()) {
+            Log.d(TAG, "Deleted screenshot after successful webhook upload: $fullPath")
+        } else if (file.exists()) {
+            Log.e(TAG, "Failed to delete screenshot after successful webhook upload: $fullPath")
         }
     }
 
@@ -549,10 +557,14 @@ class ScreenshotService : Service() {
             }
 
             val responseCode = connection.responseCode
-            val responseBody = connection.inputStream.bufferedReader().use { it.readText() }
+            val responseBody = if (responseCode in 200..299) {
+                connection.inputStream.bufferedReader().use { it.readText() }
+            } else {
+                connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            }
             connection.disconnect()
             if (responseCode !in 200..299) {
-                Log.e(TAG, "Webhook upload failed with HTTP $responseCode")
+                Log.e(TAG, "Webhook upload failed with HTTP $responseCode: $responseBody")
                 false
             } else {
                 lastWebhookMessageId = JSONObject(responseBody).optString("id").takeIf { it.isNotBlank() }
