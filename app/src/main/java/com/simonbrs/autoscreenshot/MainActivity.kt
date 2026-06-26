@@ -28,8 +28,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -60,6 +63,9 @@ class MainActivity : ComponentActivity() {
         private const val AUTO_START_SERVICE = "AUTO_START_SERVICE"
         private const val KEY_SCREENSHOT_INTERVAL_SECONDS = "screenshot_interval_seconds"
         private const val KEY_WEBHOOK_URL = "webhook_url"
+        private const val KEY_WEBHOOK_MESSAGE = "webhook_message"
+        private const val KEY_WEBHOOK_TIMEZONE = "webhook_timezone"
+        private const val KEY_WEBHOOK_DELETE_PREVIOUS = "webhook_delete_previous"
         private const val DEFAULT_SCREENSHOT_INTERVAL_SECONDS = 10L
     }
     
@@ -72,6 +78,9 @@ class MainActivity : ComponentActivity() {
     private var shouldAutoStart = false
     private var screenshotIntervalSeconds by mutableStateOf(DEFAULT_SCREENSHOT_INTERVAL_SECONDS)
     private var webhookUrl by mutableStateOf("")
+    private var webhookMessage by mutableStateOf("")
+    private var webhookTimezone by mutableStateOf("Asia/Ho_Chi_Minh")
+    private var deletePreviousWebhookMessage by mutableStateOf(false)
     private val webhookExecutor = Executors.newSingleThreadExecutor()
     
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -83,6 +92,9 @@ class MainActivity : ComponentActivity() {
         shouldAutoStart = intent?.getBooleanExtra(AUTO_START_SERVICE, false) ?: false
         screenshotIntervalSeconds = prefs.getLong(KEY_SCREENSHOT_INTERVAL_SECONDS, DEFAULT_SCREENSHOT_INTERVAL_SECONDS)
         webhookUrl = prefs.getString(KEY_WEBHOOK_URL, "") ?: ""
+        webhookMessage = prefs.getString(KEY_WEBHOOK_MESSAGE, "") ?: ""
+        webhookTimezone = prefs.getString(KEY_WEBHOOK_TIMEZONE, "Asia/Ho_Chi_Minh") ?: "Asia/Ho_Chi_Minh"
+        deletePreviousWebhookMessage = prefs.getBoolean(KEY_WEBHOOK_DELETE_PREVIOUS, false)
         
         mediaProjectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         
@@ -106,6 +118,9 @@ class MainActivity : ComponentActivity() {
                 serviceIntent.putExtra(ScreenshotService.EXTRA_RESULT_DATA, result.data)
                 serviceIntent.putExtra(ScreenshotService.EXTRA_INTERVAL_SECONDS, screenshotIntervalSeconds)
                 serviceIntent.putExtra(ScreenshotService.EXTRA_WEBHOOK_URL, webhookUrl)
+                serviceIntent.putExtra(ScreenshotService.EXTRA_WEBHOOK_MESSAGE, webhookMessage)
+                serviceIntent.putExtra(ScreenshotService.EXTRA_WEBHOOK_TIMEZONE, webhookTimezone)
+                serviceIntent.putExtra(ScreenshotService.EXTRA_WEBHOOK_DELETE_PREVIOUS, deletePreviousWebhookMessage)
                 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     startForegroundService(serviceIntent)
@@ -133,7 +148,12 @@ class MainActivity : ComponentActivity() {
                         isServiceRunning = isServiceRunning,
                         initialIntervalSeconds = screenshotIntervalSeconds.toString(),
                         initialWebhookUrl = webhookUrl,
-                        onSettingsChanged = { intervalSeconds, webhook -> saveCaptureSettings(intervalSeconds, webhook) },
+                        initialWebhookMessage = webhookMessage,
+                        initialWebhookTimezone = webhookTimezone,
+                        initialDeletePreviousWebhookMessage = deletePreviousWebhookMessage,
+                        onSettingsChanged = { intervalSeconds, webhook, message, timezone, deletePrevious ->
+                            saveCaptureSettings(intervalSeconds, webhook, message, timezone, deletePrevious)
+                        },
                         onStartService = { startScreenshotCapture() },
                         onStopService = { stopScreenshotService() }
                     )
@@ -180,12 +200,24 @@ class MainActivity : ComponentActivity() {
         prefs.edit().putBoolean(KEY_SERVICE_RUNNING, running).apply()
     }
 
-    private fun saveCaptureSettings(intervalSeconds: Long, webhook: String) {
+    private fun saveCaptureSettings(
+        intervalSeconds: Long,
+        webhook: String,
+        message: String,
+        timezone: String,
+        deletePrevious: Boolean
+    ) {
         screenshotIntervalSeconds = intervalSeconds.coerceAtLeast(1L)
         webhookUrl = webhook.trim()
+        webhookMessage = message
+        webhookTimezone = timezone.trim().ifBlank { "Asia/Ho_Chi_Minh" }
+        deletePreviousWebhookMessage = deletePrevious
         prefs.edit()
             .putLong(KEY_SCREENSHOT_INTERVAL_SECONDS, screenshotIntervalSeconds)
             .putString(KEY_WEBHOOK_URL, webhookUrl)
+            .putString(KEY_WEBHOOK_MESSAGE, webhookMessage)
+            .putString(KEY_WEBHOOK_TIMEZONE, webhookTimezone)
+            .putBoolean(KEY_WEBHOOK_DELETE_PREVIOUS, deletePreviousWebhookMessage)
             .apply()
     }
     
@@ -399,16 +431,28 @@ fun ScreenshotScreen(
     isServiceRunning: Boolean,
     initialIntervalSeconds: String,
     initialWebhookUrl: String,
-    onSettingsChanged: (Long, String) -> Unit,
+    initialWebhookMessage: String,
+    initialWebhookTimezone: String,
+    initialDeletePreviousWebhookMessage: Boolean,
+    onSettingsChanged: (Long, String, String, String, Boolean) -> Unit,
     onStartService: () -> Unit,
     onStopService: () -> Unit
 ) {
     var intervalText by remember { mutableStateOf(initialIntervalSeconds) }
     var webhookText by remember { mutableStateOf(initialWebhookUrl) }
+    var webhookMessageText by remember { mutableStateOf(initialWebhookMessage) }
+    var webhookTimezoneText by remember { mutableStateOf(initialWebhookTimezone) }
+    var deletePreviousWebhookMessage by remember { mutableStateOf(initialDeletePreviousWebhookMessage) }
 
-    LaunchedEffect(intervalText, webhookText) {
+    LaunchedEffect(intervalText, webhookText, webhookMessageText, webhookTimezoneText, deletePreviousWebhookMessage) {
         val intervalSeconds = intervalText.toLongOrNull()?.coerceAtLeast(1L) ?: 10L
-        onSettingsChanged(intervalSeconds, webhookText)
+        onSettingsChanged(
+            intervalSeconds,
+            webhookText,
+            webhookMessageText,
+            webhookTimezoneText,
+            deletePreviousWebhookMessage
+        )
     }
     
     Scaffold { innerPadding ->
@@ -416,6 +460,7 @@ fun ScreenshotScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
+                .verticalScroll(rememberScrollState())
                 .padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
@@ -451,6 +496,45 @@ fun ScreenshotScreen(
                 label = { Text("Webhook URL (optional)") },
                 enabled = !isServiceRunning,
                 singleLine = true
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            OutlinedTextField(
+                value = webhookMessageText,
+                onValueChange = { webhookMessageText = it },
+                label = { Text("Webhook message (optional)") },
+                placeholder = { Text("Hiện tại {day} {time}") },
+                supportingText = { Text("Placeholders: {time}, {day}, {date}, {timezone}, {filename}") },
+                enabled = !isServiceRunning,
+                minLines = 2
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            OutlinedTextField(
+                value = webhookTimezoneText,
+                onValueChange = { webhookTimezoneText = it },
+                label = { Text("Time.Now location/timezone") },
+                placeholder = { Text("Asia/Ho_Chi_Minh") },
+                supportingText = { Text("Pick a Time.Now location from /timezone, e.g. Asia/Ho_Chi_Minh, Europe/London") },
+                enabled = !isServiceRunning,
+                singleLine = true
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Button(
+                onClick = { deletePreviousWebhookMessage = !deletePreviousWebhookMessage },
+                enabled = !isServiceRunning,
+                colors = ButtonDefaults.buttonColors()
+            ) {
+                Text(if (deletePreviousWebhookMessage) "Delete previous after next send: On" else "Delete previous after next send: Off")
+            }
+
+            Text(
+                text = "When enabled, the old webhook message is deleted only after the next screenshot webhook is sent successfully. Timing follows your interval above (for example, 10 minutes).",
+                style = MaterialTheme.typography.bodySmall
             )
 
             Spacer(modifier = Modifier.height(32.dp))
@@ -490,7 +574,10 @@ fun ScreenshotScreenPreview() {
             isServiceRunning = false,
             initialIntervalSeconds = "10",
             initialWebhookUrl = "",
-            onSettingsChanged = { _, _ -> },
+            initialWebhookMessage = "Hiện tại {day} {time}",
+            initialWebhookTimezone = "Asia/Ho_Chi_Minh",
+            initialDeletePreviousWebhookMessage = false,
+            onSettingsChanged = { _, _, _, _, _ -> },
             onStartService = {},
             onStopService = {}
         )

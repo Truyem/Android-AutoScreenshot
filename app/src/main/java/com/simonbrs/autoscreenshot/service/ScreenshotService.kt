@@ -25,14 +25,18 @@ import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
+import org.json.JSONObject
 import com.simonbrs.autoscreenshot.R
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.OutputStreamWriter
+import java.net.URLEncoder
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Calendar
+import java.time.OffsetDateTime
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -51,6 +55,9 @@ class ScreenshotService : Service() {
         const val EXTRA_RESULT_DATA = "extra_result_data"
         const val EXTRA_INTERVAL_SECONDS = "extra_interval_seconds"
         const val EXTRA_WEBHOOK_URL = "extra_webhook_url"
+        const val EXTRA_WEBHOOK_MESSAGE = "extra_webhook_message"
+        const val EXTRA_WEBHOOK_TIMEZONE = "extra_webhook_timezone"
+        const val EXTRA_WEBHOOK_DELETE_PREVIOUS = "extra_webhook_delete_previous"
         
         // Flag to ensure only one instance is running
         private val isRunning = AtomicBoolean(false)
@@ -74,6 +81,10 @@ class ScreenshotService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var screenshotIntervalMs = TimeUnit.SECONDS.toMillis(DEFAULT_SCREENSHOT_INTERVAL_SECONDS)
     private var webhookUrl = ""
+    private var webhookMessage = ""
+    private var webhookTimezone = "Asia/Ho_Chi_Minh"
+    private var deletePreviousWebhookMessage = false
+    private var lastWebhookMessageId: String? = null
     
     // Add listener inline variable
     private var imageListener: ImageReader.OnImageAvailableListener? = null
@@ -105,6 +116,9 @@ class ScreenshotService : Service() {
                     .coerceAtLeast(MIN_SCREENSHOT_INTERVAL_SECONDS)
                 screenshotIntervalMs = TimeUnit.SECONDS.toMillis(intervalSeconds)
                 webhookUrl = intent.getStringExtra(EXTRA_WEBHOOK_URL)?.trim().orEmpty()
+                webhookMessage = intent.getStringExtra(EXTRA_WEBHOOK_MESSAGE).orEmpty()
+                webhookTimezone = intent.getStringExtra(EXTRA_WEBHOOK_TIMEZONE)?.trim().orEmpty().ifBlank { "Asia/Ho_Chi_Minh" }
+                deletePreviousWebhookMessage = intent.getBooleanExtra(EXTRA_WEBHOOK_DELETE_PREVIOUS, false)
                 // Start foreground service BEFORE setting up media projection
                 val notification = createNotification()
                 
@@ -500,22 +514,25 @@ class ScreenshotService : Service() {
             return false
         }
 
+        val previousMessageId = lastWebhookMessageId
+
         return try {
             val boundary = "AutoScreenshotBoundary${System.currentTimeMillis()}"
-            val connection = (URL(webhookUrl).openConnection() as HttpURLConnection).apply {
+            val connection = (URL(webhookPostUrl()).openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
                 doOutput = true
                 connectTimeout = 15_000
                 readTimeout = 15_000
                 setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
             }
+            val content = buildWebhookMessage(file)
 
             connection.outputStream.use { output ->
                 OutputStreamWriter(output, Charsets.UTF_8).use { writer ->
                     writer.append("--$boundary\r\n")
                     writer.append("Content-Disposition: form-data; name=\"payload_json\"\r\n")
                     writer.append("Content-Type: application/json\r\n\r\n")
-                    writer.append("{\"content\":\"New screenshot: ${file.name}\"}\r\n")
+                    writer.append("{\"content\":\"${escapeJson(content)}\"}\r\n")
                     writer.append("--$boundary\r\n")
                     writer.append("Content-Disposition: form-data; name=\"files[0]\"; filename=\"${file.name}\"\r\n")
                     writer.append("Content-Type: image/png\r\n\r\n")
@@ -532,11 +549,16 @@ class ScreenshotService : Service() {
             }
 
             val responseCode = connection.responseCode
+            val responseBody = connection.inputStream.bufferedReader().use { it.readText() }
             connection.disconnect()
             if (responseCode !in 200..299) {
                 Log.e(TAG, "Webhook upload failed with HTTP $responseCode")
                 false
             } else {
+                lastWebhookMessageId = JSONObject(responseBody).optString("id").takeIf { it.isNotBlank() }
+                if (deletePreviousWebhookMessage) {
+                    deleteWebhookMessage(previousMessageId)
+                }
                 Log.d(TAG, "Screenshot uploaded to webhook: ${file.name}")
                 true
             }
@@ -545,6 +567,90 @@ class ScreenshotService : Service() {
             false
         }
     }
+
+    private fun webhookPostUrl(): String {
+        return if (webhookUrl.contains("?")) {
+            "$webhookUrl&wait=true"
+        } else {
+            "$webhookUrl?wait=true"
+        }
+    }
+
+    private fun deleteWebhookMessage(messageId: String?) {
+        messageId ?: return
+        try {
+            val deleteUrl = webhookUrl.substringBefore("?").trimEnd('/') + "/messages/" + URLEncoder.encode(messageId, "UTF-8")
+            val connection = (URL(deleteUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "DELETE"
+                connectTimeout = 15_000
+                readTimeout = 15_000
+            }
+            val responseCode = connection.responseCode
+            connection.disconnect()
+            if (responseCode !in 200..299 && responseCode != HttpURLConnection.HTTP_NOT_FOUND) {
+                Log.e(TAG, "Previous webhook message delete failed with HTTP $responseCode")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error deleting previous webhook message", e)
+        }
+    }
+
+    private fun buildWebhookMessage(file: File): String {
+        val template = webhookMessage.ifBlank { "" }
+        if (template.isBlank()) {
+            return ""
+        }
+        val timeData = fetchWebTimeData()
+        return template
+            .replace("{filename}", file.name)
+            .replace("{timezone}", timeData.timezone)
+            .replace("{date}", timeData.date)
+            .replace("{day}", timeData.day)
+            .replace("{time}", timeData.time)
+    }
+
+    private fun fetchWebTimeData(): WebTimeData {
+        return try {
+            val safeTimezone = webhookTimezone.trim('/').ifBlank { "Asia/Ho_Chi_Minh" }
+            val response = URL("https://time.now/developer/api/timezone/$safeTimezone")
+                .openConnection()
+                .let { it as HttpURLConnection }
+                .apply {
+                    requestMethod = "GET"
+                    connectTimeout = 10_000
+                    readTimeout = 10_000
+                }
+            val body = response.inputStream.bufferedReader().use { it.readText() }
+            response.disconnect()
+            val json = JSONObject(body)
+            val datetime = json.optString("datetime")
+            val parsed = OffsetDateTime.parse(datetime)
+            WebTimeData(
+                time = parsed.format(DateTimeFormatter.ofPattern("HH:mm:ss", Locale.US)),
+                date = parsed.format(DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.US)),
+                day = parsed.format(DateTimeFormatter.ofPattern("EEEE", Locale.US)),
+                timezone = json.optString("timezone", safeTimezone)
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error fetching Time.Now data", e)
+            WebTimeData(time = "", date = "", day = "", timezone = webhookTimezone)
+        }
+    }
+
+    private fun escapeJson(value: String): String {
+        return value
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+    }
+
+    private data class WebTimeData(
+        val time: String,
+        val date: String,
+        val day: String,
+        val timezone: String
+    )
 
     private fun areFilesIdentical(file1: File, file2: File): Boolean {
         if (!file1.exists() || !file2.exists() || file1.length() != file2.length()) {
