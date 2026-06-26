@@ -514,9 +514,7 @@ class ScreenshotService : Service() {
             return false
         }
 
-        if (deletePreviousWebhookMessage) {
-            deleteLastWebhookMessage()
-        }
+        val previousMessageId = lastWebhookMessageId
 
         return try {
             val boundary = "AutoScreenshotBoundary${System.currentTimeMillis()}"
@@ -558,6 +556,9 @@ class ScreenshotService : Service() {
                 false
             } else {
                 lastWebhookMessageId = JSONObject(responseBody).optString("id").takeIf { it.isNotBlank() }
+                if (deletePreviousWebhookMessage) {
+                    deleteWebhookMessage(previousMessageId)
+                }
                 Log.d(TAG, "Screenshot uploaded to webhook: ${file.name}")
                 true
             }
@@ -575,8 +576,8 @@ class ScreenshotService : Service() {
         }
     }
 
-    private fun deleteLastWebhookMessage() {
-        val messageId = lastWebhookMessageId ?: return
+    private fun deleteWebhookMessage(messageId: String?) {
+        messageId ?: return
         try {
             val deleteUrl = webhookUrl.substringBefore("?").trimEnd('/') + "/messages/" + URLEncoder.encode(messageId, "UTF-8")
             val connection = (URL(deleteUrl).openConnection() as HttpURLConnection).apply {
@@ -586,9 +587,7 @@ class ScreenshotService : Service() {
             }
             val responseCode = connection.responseCode
             connection.disconnect()
-            if (responseCode in 200..299 || responseCode == HttpURLConnection.HTTP_NOT_FOUND) {
-                lastWebhookMessageId = null
-            } else {
+            if (responseCode !in 200..299 && responseCode != HttpURLConnection.HTTP_NOT_FOUND) {
                 Log.e(TAG, "Previous webhook message delete failed with HTTP $responseCode")
             }
         } catch (e: Exception) {

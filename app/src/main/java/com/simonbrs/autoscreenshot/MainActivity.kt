@@ -515,9 +515,9 @@ fun ScreenshotScreen(
             OutlinedTextField(
                 value = webhookTimezoneText,
                 onValueChange = { webhookTimezoneText = it },
-                label = { Text("Time.Now timezone") },
+                label = { Text("Time.Now location/timezone") },
                 placeholder = { Text("Asia/Ho_Chi_Minh") },
-                supportingText = { Text("Use an IANA timezone from time.now, e.g. Asia/Ho_Chi_Minh") },
+                supportingText = { Text("Pick a Time.Now location from /timezone, e.g. Asia/Ho_Chi_Minh, Europe/London") },
                 enabled = !isServiceRunning,
                 singleLine = true
             )
@@ -529,8 +529,13 @@ fun ScreenshotScreen(
                 enabled = !isServiceRunning,
                 colors = ButtonDefaults.buttonColors()
             ) {
-                Text(if (deletePreviousWebhookMessage) "Delete previous webhook message: On" else "Delete previous webhook message: Off")
+                Text(if (deletePreviousWebhookMessage) "Delete previous after next send: On" else "Delete previous after next send: Off")
             }
+
+            Text(
+                text = "When enabled, the old webhook message is deleted only after the next screenshot webhook is sent successfully. Timing follows your interval above (for example, 10 minutes).",
+                style = MaterialTheme.typography.bodySmall
+            )
 
             Spacer(modifier = Modifier.height(32.dp))
             
